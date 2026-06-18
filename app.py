@@ -208,13 +208,24 @@ with col2:
 
 # Run search
 if run:
-    names = [n.strip() for n in raw_input.splitlines() if n.strip()]
+    raw_names = [n.strip() for n in raw_input.splitlines() if n.strip()]
+    # Deduplicate case-insensitively, keep first occurrence
+    seen = set()
+    names = []
+    for n in raw_names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            names.append(n)
+    dupes = len(raw_names) - len(names)
+
     if not names:
         st.warning("Bitte mindestens einen Namen eingeben.")
         st.stop()
     if len(names) > 20:
-        st.warning("Maximal 20 Namen auf einmal. Bitte Liste kürzen.")
+        st.warning("Maximal 20 Namen auf einmal. Bitte Liste kuerzen.")
         st.stop()
+    if dupes > 0:
+        st.info(f"{dupes} doppelte(r) Name(n) uebersprungen (Gross-/Kleinschreibung wird ignoriert).")
 
     results = []
     progress = st.progress(0, text="Prüfe Namen...")
@@ -308,13 +319,16 @@ if run:
                 "Signa-ID":       "",
             })
 
-    df  = pd.DataFrame(export_rows)
-    csv = df.to_csv(index=False, sep=";", encoding="utf-8-sig")
+    df = pd.DataFrame(export_rows)
+    import io
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Markenpruefung")
     st.download_button(
-        "⬇ Ergebnisse als CSV",
-        data=csv,
-        file_name="markenpruefung_euipo.csv",
-        mime="text/csv",
+        "⬇ Ergebnisse als Excel",
+        data=buf.getvalue(),
+        file_name="markenpruefung_euipo.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 # Footer
