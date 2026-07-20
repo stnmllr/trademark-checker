@@ -126,6 +126,15 @@ SIMILAR_SCORE_FLOOR   = 60   # darunter: als Rauschen ignorieren
 # das günstige Haiku liefert zu brave/generische Vorschläge.
 LLM_MODEL = st.secrets.get("LLM_MODEL", "claude-sonnet-5")
 
+# Leitmotiv: der nächste Evolutionsschritt = Emergenz (auf Wunsch der Gesellschafter).
+EVOLUTION_THEME = (
+    "Leitmotiv (sinngemäß spürbar, NICHT wörtlich): der nächste Schritt nach der Evolution — "
+    "Emergenz. Aus dem Zusammenspiel von Daten und Prozessen entsteht eine neue, höhere Ordnung "
+    "und Intelligenz (Emergenz, Sprung, neue Art, das Ganze ist mehr als seine Teile). "
+    "Das Motiv darf anklingen, aber verwende NICHT die wörtlichen Begriffe 'Evolution', 'Emergence', "
+    "'Emergent', 'Evolve', 'Nexus' o. Ä. im Namen."
+)
+
 # Ausgelutschte Tech-Namen-Klischees, die die KI meiden soll (fast alle längst vergeben).
 NAME_CLICHES = (
     "Artemis, Apollo, Helios, Atlas, Aurora, Nova, Terra, Luna, Lumina, Luminae, Aura, Solaris, "
@@ -368,6 +377,7 @@ def build_prompt(brief: dict, n: int) -> str:
         "ausgelutschten Latein-/Griechisch-Wörtern für Wissen, Licht, Geist oder Wahrheit "
         "(Cognita, Lumina, Acuity, Qualia, Insightia …). Solche Namen sind verboten."
     )
+    lines.append(EVOLUTION_THEME)
     lines.append("Sprache: " + brief.get("language", "international"))
     if brief.get("styles"):
         lines.append("Bevorzugter Stil: " + ", ".join(brief["styles"]))
@@ -383,11 +393,12 @@ def build_prompt(brief: dict, n: int) -> str:
         "Erzeuge bewusst VIELFALT über diese Konstruktionsprinzipien und verteile die Vorschläge "
         "darüber (nicht alle nach einem Schema):"
     )
-    lines.append("1) Konkrete Zusammensetzungen zweier echter Wörter, bildhaft & besitzbar (im Geist von 'Trueforge': Handwerk, Aufbau, Stärke, Struktur).")
+    lines.append("1) Konkrete Zusammensetzungen zweier echter Wörter, bildhaft & besitzbar (im Geist von 'Trueforge', aber BREITER: Struktur, Fundament, Übersicht, Verbindung, Steuerung, Zusammenhang — nicht nur Schmiede/Handwerk).")
     lines.append("2) Leicht abgewandelte echte Wörter (ein Buchstabe/eine Silbe verschoben), sodass sie eigenständig und markenfähig werden.")
-    lines.append("3) Metaphern aus UNerwarteten Domänen — Schmiedekunst, Seefahrt, Geologie, Architektur, Musik, Mechanik/Getriebe — NICHT die üblichen Licht-/Gehirn-/Sternen-Bilder.")
-    lines.append("4) Gut klingende, leicht aussprechbare Lehnwörter aus selteneren Sprachen (nordisch, finnisch, japanisch, baskisch).")
-    lines.append("5) Kurze, kantige Kunstwörter mit markantem Konsonanten-Rhythmus (kein weiches -ia/-us/-a-Standardmuster).")
+    lines.append("3) Metaphern aus unerwarteten, aber SERIÖSEN Domänen — Architektur, Geologie/Schichten, Kartografie/Navigation, Mechanik/Getriebe, Statik — NICHT die üblichen Licht-/Gehirn-/Sternen-Bilder.")
+    lines.append("4) Ruhige, klare Neuschöpfungen aus einer echten Wortwurzel (Latein/Deutsch/Englisch), professionell und leicht lesbar.")
+    lines.append("5) Kurze, klare Kunstwörter mit ruhigem, seriösem Klang — NICHT rau/kantig, NICHT wie erfundene Fantasy-Namen.")
+    lines.append("Nicht mehrere Namen mit demselben Suffix (nicht mehrfach -forge, -craft, -wise, -frame, -line).")
 
     lines.append(
         "Verboten sind diese Klischees und alles, was ihnen stark ähnelt: " + NAME_CLICHES + ". "
@@ -397,6 +408,12 @@ def build_prompt(brief: dict, n: int) -> str:
         "Jeder Name soll wie ein eigenständiger Produktname wirken, den man als Marke besitzen kann — "
         "nicht wie ein Wörterbuch- oder Mythologie-Eintrag. Wenn ein Name sich anfühlt, als hätte ihn "
         "schon jemand, verwirf ihn selbst."
+    )
+    lines.append(
+        "SERIOSITÄT (hart): Der Name muss im B2B-/Mittelstandskontext seriös und glaubwürdig sein. "
+        "KEIN Fantasy-, Rollenspiel-, Games- oder Sci-Fi-Klang (nicht wie ein Videospiel-Titel wie "
+        "'Veylan', 'Kironda', 'Brenmark'). Ein Geschäftsführer muss den Namen im Anzug einem Kunden "
+        "nennen können, ohne dass es albern oder nach Gaming wirkt."
     )
 
     # Harte/weiche Regeln aus dem Gesellschafter-Feedback
