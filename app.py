@@ -452,6 +452,21 @@ def domains_html(domains: dict) -> str:
     return " ".join(parts)
 
 
+# --- Tiefenprüfung: geführte Links zu autoritativen Registern -------------
+# DE=DPMA (national), EM=EU-Unionsmarke, WO=Madrid/international
+def tmview_url(name: str, offices: str = "DE,EM,WO") -> str:
+    return ("https://www.tmdn.org/tmview/#/tmview/results?page=1&pageSize=30&criteria=C"
+            f"&offices={offices}&basicSearch={quote(name)}&tmStatus=Filed,Registered")
+
+
+DPMAREGISTER_URL = "https://register.dpma.de/DPMAregister/marke/einsteiger"
+HANDELSREGISTER_URL = "https://www.handelsregister.de/rp_web/erweitertesuche.xhtml"
+
+
+def google_exact_url(name: str) -> str:
+    return "https://www.google.com/search?q=" + quote(f'"{name}" software')
+
+
 # ===========================================================================
 # UI
 # ===========================================================================
@@ -463,7 +478,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_find, tab_check = st.tabs(["✨ Namen finden", "🔍 Namen prüfen"])
+tab_find, tab_check, tab_deep = st.tabs(["✨ Namen finden", "🔍 Namen prüfen", "🎯 Tiefenprüfung"])
 
 # ---------------------------------------------------------------------------
 # TAB: Namen finden
@@ -829,5 +844,81 @@ with tab_check:
       Datenquelle: EUIPO Unionsmarkenregister (+ optional WIPO/Madrid) via Signa API.<br>
       <strong>Nationale DE-Marken (DPMA) sind nicht enthalten.</strong>
       Dieser Schnellcheck ersetzt <strong>keine</strong> rechtliche Markenrecherche.
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# TAB: Tiefenprüfung (Finalisten-Cockpit)
+# ---------------------------------------------------------------------------
+with tab_deep:
+    st.markdown("#### Finalisten-Tiefenprüfung")
+    st.caption(
+        "Für die 1–5 Favoriten: automatischer EU-Marken- und Domain-Check plus "
+        "geführte Ein-Klick-Links zu DPMA, TMview und Handelsregister."
+    )
+
+    deep_raw = st.text_area(
+        "Finalisten (ein Name pro Zeile, max. 5)",
+        height=120,
+        placeholder="z. B.\nCerebra\nCognita\nNexia",
+        key="deep_input",
+    )
+    deep_house = st.text_input("Hausmarke (für die Marktform)", value="eEvolution", key="deep_house")
+    deep_btn = st.button("🎯 Tiefenprüfung starten", key="deep_run")
+
+    if deep_btn:
+        names = [n.strip() for n in deep_raw.splitlines() if n.strip()][:5]
+        if not names:
+            st.warning("Bitte mindestens einen Namen eingeben.")
+            st.stop()
+
+        prog = st.progress(0, text="Prüfe Finalisten…")
+        for i, name in enumerate(names):
+            prog.progress((i + 1) / len(names), text=f"Prüfe {name}…")
+
+            hits = query_signa(name, [9, 42], ["euipo", "wipo"], silent=True)
+            label, css, summary = classify_result(hits)
+            doms = check_domains(name, tlds=("com", "de", "eu", "io"))
+
+            pill = {"clear": "pill-green", "warn": "pill-yellow", "hit": "pill-red", "unknown": "pill-gray"}.get(css, "pill-gray")
+            marktform = f"{deep_house.strip()} {name}" if deep_house.strip() else name
+
+            st.markdown(f"""
+            <div class="name-card">
+              <h3>{name} <span class="status-pill {pill}" style="vertical-align:middle;">{label}</span></h3>
+              <div class="meta">Marktform: <strong>{marktform}</strong> &nbsp;·&nbsp; EU-Marke (EUIPO + Madrid): {summary}</div>
+              <div style="margin-top:0.4rem;">{domains_html(doms)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if hits:
+                with st.expander("EU-Marken-Treffer zu " + name):
+                    for tm in hits[:8]:
+                        st.markdown(render_hit(tm), unsafe_allow_html=True)
+
+            st.markdown(
+                "**Manuell prüfen (kostenlos, 1 Klick):** "
+                + f"[TMview – DE + EU + IR ↗]({tmview_url(name)}) &nbsp;·&nbsp; "
+                + f"[DPMAregister (DE-national) ↗]({DPMAREGISTER_URL}) &nbsp;·&nbsp; "
+                + f"[Handelsregister (Firmenname) ↗]({HANDELSREGISTER_URL}) &nbsp;·&nbsp; "
+                + f"[Google-Suche ↗]({google_exact_url(name)})"
+            )
+            st.markdown("---")
+        prog.empty()
+
+        st.info(
+            "**Automatisiert:** EU-Marken (EUIPO + Madrid) und Domains. "
+            "**DPMA (DE-national) und Firmennamen bitte über die Links oben manuell prüfen** – "
+            "eine kostenlose, zuverlässige Vollautomatik gibt es dafür nicht (TMview benötigt einen "
+            "Datenvertrag, Handelsregister blockt automatisierte Zugriffe). Der TMview-Link ist bereits "
+            "auf DE + EU + international vorgefiltert."
+        )
+
+    st.markdown("""
+    <div class="disclaimer">
+      Tiefenprüfung für Finalisten: automatischer EU-Check + geführte Register-Links.<br>
+      Für die rechtsverbindliche Freigabe bleibt die anwaltliche Recherche (DPMA-Ähnlichkeit,
+      Firmenname, Titelschutz) maßgeblich.
     </div>
     """, unsafe_allow_html=True)
