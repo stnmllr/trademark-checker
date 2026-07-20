@@ -441,12 +441,28 @@ def parse_candidates(text: str) -> list[dict]:
     if not text:
         return []
     a, b = text.find("["), text.rfind("]")
-    if a == -1 or b == -1 or b < a:
+    snippet = text[a:b + 1] if (a != -1 and b != -1 and b > a) else text
+
+    data = None
+    for attempt in (snippet, re.sub(r",\s*([\]}])", r"\1", snippet)):  # 2. Versuch: Trailing-Commas entfernen
+        try:
+            data = json.loads(attempt)
+            break
+        except Exception:
+            continue
+
+    if data is None:
+        # Fallback: einzelne Objekte per Regex herausziehen
+        data = []
+        for m in re.finditer(r"\{[^{}]*\}", snippet):
+            try:
+                data.append(json.loads(m.group(0)))
+            except Exception:
+                pass
+
+    if not isinstance(data, list):
         return []
-    try:
-        data = json.loads(text[a:b + 1])
-    except Exception:
-        return []
+
     out, seen = [], set()
     for it in data:
         if not isinstance(it, dict):
@@ -483,15 +499,26 @@ def generate_names(brief: dict, n: int) -> list[dict] | None:
     try:
         msg = client.messages.create(
             model=LLM_MODEL,
-            max_tokens=2000,
+            max_tokens=3000,
             system=system,
-            messages=[{"role": "user", "content": build_prompt(brief, n)}],
+            messages=[
+                {"role": "user", "content": build_prompt(brief, n)},
+                # Prefill erzwingt reines JSON-Array (kein Fließtext drumherum)
+                {"role": "assistant", "content": "["},
+            ],
         )
         text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
     except Exception as e:
         st.error(f"LLM-Aufruf fehlgeschlagen: {e}")
         return None
-    return parse_candidates(text)
+
+    # Prefill '[' gehört zur Antwort dazu -> wieder voranstellen
+    full = "[" + text
+    cands = parse_candidates(full)
+    if not cands:
+        with st.expander("Debug: Rohantwort der KI (kein JSON erkannt)"):
+            st.code((full or "(leer)")[:2500])
+    return cands
 
 
 def domains_html(domains: dict) -> str:
