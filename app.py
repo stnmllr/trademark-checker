@@ -105,16 +105,10 @@ OFFICE_CHOICES = {
 DEFAULT_OFFICES = ["euipo"]
 
 # --- Suchmodus -------------------------------------------------------------
-# Signa unterstützt laut Doku vier Strategien: exact / fuzzy / phonetic / prefix.
-# Wir wollen bewusst auch KLANGLICH und TIPPFEHLER-ÄHNLICHE Marken finden
-# (z. B. "Horizon" vs. "Horyzen"), nicht nur identische Schreibweisen.
-#
-# HINWEIS: Der exakte Request-Parametername konnte ohne Live-API-Key nicht
-# final verifiziert werden. Wir senden ihn bevorzugt mit; lehnt die API ihn
-# mit HTTP 400 ab, wiederholen wir die Anfrage automatisch ohne ihn
-# (Kompatibilitätsmodus). Bei Bedarf hier an die echte Doku anpassen:
-STRATEGY_PARAM = "search_type"            # ggf. anpassen: z.B. "match"/"strategies"
-STRATEGY_VALUE = "exact,fuzzy,phonetic"   # breite Trefferabdeckung
+# Die /v1/trademarks-Suche liefert bereits per Default auch klanglich/
+# schriftbildlich ähnliche Treffer (fuzzy/phonetic) samt relevance_score.
+# Ein expliziter Strategie-Parameter ist daher nicht nötig und wird nicht
+# gesendet (das vermeidet 400-Fehler).
 EXACT_SCORE_THRESHOLD = 90                # relevance_score >= X  => Kollision
 SIMILAR_SCORE_FLOOR   = 60                # darunter: als Rauschen ignorieren
 
@@ -187,21 +181,8 @@ def query_signa(name: str, nice_classes: list[int], offices: list[str]) -> list[
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    # Erst mit Ähnlichkeits-Strategie versuchen (sofern noch nicht als
-    # inkompatibel erkannt), sonst direkt im Kompatibilitätsmodus.
-    use_strategy = st.session_state.get("signa_strategy_ok", True)
-    params = dict(base_params)
-    if use_strategy:
-        params[STRATEGY_PARAM] = STRATEGY_VALUE
-
     try:
-        r = requests.get(SIGNA_URL, params=params, headers=headers, timeout=12)
-
-        # API akzeptiert den Strategie-Parameter nicht -> einmal ohne wiederholen
-        if r.status_code == 400 and use_strategy:
-            st.session_state["signa_strategy_ok"] = False
-            st.session_state["signa_compat_note"] = True
-            r = requests.get(SIGNA_URL, params=base_params, headers=headers, timeout=12)
+        r = requests.get(SIGNA_URL, params=base_params, headers=headers, timeout=12)
 
         if r.status_code == 401:
             st.error("API-Key ungültig. Bitte in den App-Settings unter Secrets prüfen.")
@@ -368,14 +349,6 @@ if run:
         time.sleep(0.2)
 
     progress.empty()
-
-    # Hinweis, falls die API im Kompatibilitätsmodus lief (kein Ähnlichkeits-Match)
-    if st.session_state.get("signa_compat_note"):
-        st.warning(
-            "Hinweis: Die API hat den Ähnlichkeits-Parameter nicht akzeptiert — "
-            "es wurde nur nach (nahezu) identischen Namen gesucht. "
-            f"Parametername in app.py prüfen (STRATEGY_PARAM = \"{STRATEGY_PARAM}\")."
-        )
 
     # Summary bar
     n_hit   = sum(1 for r in results if r["css_class"] == "hit")
