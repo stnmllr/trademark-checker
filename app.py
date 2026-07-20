@@ -430,9 +430,8 @@ def build_prompt(brief: dict, n: int) -> str:
     else:
         lines.append("Kreativitätsgrad: eher konservativ, klar und sofort zugänglich.")
     lines.append(
-        'Antworte AUSSCHLIESSLICH mit reinem JSON in genau diesem Format, '
-        'ohne Text davor oder danach:\n'
-        '[{"name": "Beispielname", "family": "Kunstwort", "rationale": "1 kurzer Satz, warum es passt"}]'
+        f"Gib genau {n} Vorschläge über das Werkzeug 'namen_abgeben' zurück "
+        "(je Eintrag: name, family, rationale)."
     )
     return "\n".join(lines)
 
@@ -462,7 +461,10 @@ def parse_candidates(text: str) -> list[dict]:
 
     if not isinstance(data, list):
         return []
+    return _normalize_items(data)
 
+
+def _normalize_items(data: list) -> list[dict]:
     out, seen = [], set()
     for it in data:
         if not isinstance(it, dict):
@@ -494,30 +496,61 @@ def generate_names(brief: dict, n: int) -> list[dict] | None:
     system = (
         "Du bist ein preisgekrönter Namensentwickler für Marken und B2B-Software. "
         "Du hasst generische, austauschbare KI-Namen und lieferst eigenständige, besitzbare, "
-        "überraschende Produktnamen. Du antwortest strikt im geforderten JSON-Format."
+        "überraschende Produktnamen. Nutze das Werkzeug 'namen_abgeben', um sie strukturiert zurückzugeben."
     )
+    tools = [{
+        "name": "namen_abgeben",
+        "description": "Gib die generierten Namensvorschläge strukturiert zurück.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namen": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Der Produktname"},
+                            "family": {"type": "string", "description": "Konstruktionsprinzip/Familie"},
+                            "rationale": {"type": "string", "description": "1 kurzer Satz, warum er passt"},
+                        },
+                        "required": ["name"],
+                    },
+                }
+            },
+            "required": ["namen"],
+        },
+    }]
+
     try:
         msg = client.messages.create(
             model=LLM_MODEL,
             max_tokens=3000,
             system=system,
-            messages=[
-                {"role": "user", "content": build_prompt(brief, n)},
-                # Prefill erzwingt reines JSON-Array (kein Fließtext drumherum)
-                {"role": "assistant", "content": "["},
-            ],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "namen_abgeben"},
+            messages=[{"role": "user", "content": build_prompt(brief, n)}],
         )
-        text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
     except Exception as e:
         st.error(f"LLM-Aufruf fehlgeschlagen: {e}")
         return None
 
-    # Prefill '[' gehört zur Antwort dazu -> wieder voranstellen
-    full = "[" + text
-    cands = parse_candidates(full)
-    if not cands:
-        with st.expander("Debug: Rohantwort der KI (kein JSON erkannt)"):
-            st.code((full or "(leer)")[:2500])
+    # Bevorzugt: strukturierte Tool-Ausgabe
+    items = None
+    for block in msg.content:
+        if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == "namen_abgeben":
+            inp = getattr(block, "input", None) or {}
+            items = inp.get("namen")
+            break
+
+    if isinstance(items, list):
+        cands = _normalize_items(items)
+    else:
+        # Fallback: eventuellen Freitext parsen
+        text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
+        cands = parse_candidates(text)
+        if not cands:
+            with st.expander("Debug: Rohantwort der KI"):
+                st.code((text or str(msg.content))[:2500])
     return cands
 
 
