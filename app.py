@@ -4,6 +4,7 @@ import pandas as pd
 import time
 import io
 import json
+import re
 from urllib.parse import quote
 
 # Page config
@@ -121,7 +122,16 @@ EXACT_SCORE_THRESHOLD = 90   # relevance_score >= X  => Kollision
 SIMILAR_SCORE_FLOOR   = 60   # darunter: als Rauschen ignorieren
 
 # LLM-Modell für die Namensgenerierung (per Secret überschreibbar).
-LLM_MODEL = st.secrets.get("LLM_MODEL", "claude-sonnet-5")
+LLM_MODEL = st.secrets.get("LLM_MODEL", "claude-haiku-4-5")
+
+# Produktvision (Gesellschafter-Abstimmung) — fließt in jeden Namens-Brief ein.
+PRODUCT_VISION = (
+    "Nachfolger des ERP-Systems eEvolution – kein reines Update, sondern ein neues Produkt: "
+    "cloudfähig, moderne Architektur, integrierte KI, die Prozesse, Daten und Zusammenhänge "
+    "versteht und daraus Empfehlungen ableitet. Der Name soll den Anspruch tragen, dass das "
+    "System das Unternehmen versteht und intelligente Entscheidungen unterstützt – und sich klar "
+    "von klassischem ERP-Sprech und Microsoft Business Central abgrenzen."
+)
 
 ACTIVE_STATUSES = {"active", "registered", "published", "filed", "pending"}
 
@@ -276,6 +286,37 @@ def slugify(name: str) -> str:
     return "".join(ch for ch in s if ch in _DOMAIN_CHARS)
 
 
+_VOWELS = set("aeiouy")
+_VOWEL_MAP = str.maketrans({"ä": "a", "ö": "o", "ü": "u", "ß": "s"})
+
+
+def naming_issues(name: str, open_vowels: bool = True, no_erp: bool = True) -> tuple[list[str], list[str]]:
+    """Deterministische Namensregeln aus dem Gesellschafter-Feedback.
+
+    Rückgabe: (hard_reasons, soft_tags). hard_reasons != [] => verwerfen.
+    """
+    hard, soft = [], []
+    low = name.lower().translate(_VOWEL_MAP)
+    compact = low.replace(" ", "").replace("-", "")
+
+    # Frank: 'ERP' darf nicht Namensbestandteil sein — als eigenes Wort
+    # (\berp\b) oder als klar abgesetztes Großbuchstaben-Kürzel ('ERP' im Original,
+    # z. B. 'MyERP'). 'Enterprise' o. ä. bleibt bewusst erlaubt.
+    if no_erp and (re.search(r"\berp\b", low) or "ERP" in name):
+        hard.append("enthält 'ERP'")
+
+    # Frank: offene Vokale – 'o' als EINZIGER Vokal ist ein hartes K.o.
+    vowels_present = {ch for ch in compact if ch in _VOWELS}
+    if open_vowels and vowels_present and vowels_present <= {"o"}:
+        hard.append("nur 'o' als Vokal (klanglich geschlossen/unfreundlich)")
+
+    # Stephan Müller: 'No-' am Anfang klingt nach Verneinung (nur Hinweis)
+    if compact.startswith("no"):
+        soft.append("beginnt mit 'No-' (mögliche Verneinungs-Assoziation)")
+
+    return hard, soft
+
+
 def check_domain(fqdn: str) -> str:
     """RDAP-Abfrage: 'frei' / 'vergeben' / 'unbekannt' (kein Key nötig)."""
     try:
@@ -311,16 +352,32 @@ def build_prompt(brief: dict, n: int) -> str:
         lines.append("Inspirations-/Seed-Wörter (dürfen anklingen, müssen nicht wörtlich vorkommen): " + brief["seed"])
     if brief.get("nogo"):
         lines.append("Vermeide diese Wörter/Bedeutungen: " + brief["nogo"])
+    lines.append("Produktvision: " + PRODUCT_VISION)
     lines.append("Sprache: " + brief.get("language", "international"))
     if brief.get("styles"):
         lines.append("Bevorzugter Stil: " + ", ".join(brief["styles"]))
-    lines.append(
-        "Regeln: 1–2 Wörter, gut aussprechbar, international tragfähig, "
-        "keine offensichtlich bestehenden bekannten Marken, "
-        "keine rein generischen Begriffe (nicht bloß 'ERP', 'Cloud', 'Soft'), "
-        "möglichst keine Umlaute/Sonderzeichen im Kernnamen. "
-        "Mische verschiedene Familien (Kunstwörter, wertig-latinisiert, tech-modern, Metaphern)."
+
+    # Harte/weiche Regeln aus dem Gesellschafter-Feedback
+    rules = [
+        "1–2 Wörter, gut aussprechbar, international tragfähig",
+        "keine offensichtlich bestehenden bekannten Marken",
+        "keine rein generischen Begriffe (nicht bloß 'Cloud', 'Soft', 'System')",
+        "möglichst keine Umlaute/Sonderzeichen im Kernnamen",
+    ]
+    if brief.get("no_erp", True):
+        rules.append("die Abkürzung 'ERP' darf NICHT im Namen vorkommen")
+    if brief.get("open_vowels", True):
+        rules.append(
+            "bevorzuge offen klingende Namen; vermeide Namen, deren EINZIGER Vokal 'o' ist "
+            "(im Deutschen klingt reines 'o' geschlossen/unfreundlich) – nutze offene Vokale wie a, e, i"
+        )
+    rules.append(
+        "entweder ein assoziationsfreies, gut klingendes Kunstwort ODER bewusst sachlich-beschreibend "
+        "(wie 'Business Central') – vermeide den unklaren Mittelweg"
     )
+    rules.append("grenze dich klar von klassischem ERP-Sprech und Microsoft Business Central ab")
+    lines.append("Regeln: " + "; ".join(rules) + ".")
+    lines.append("Mische verschiedene Familien (Kunstwörter, wertig-latinisiert, tech-modern, Metaphern).")
     lines.append(
         'Antworte AUSSCHLIESSLICH mit reinem JSON in genau diesem Format, '
         'ohne Text davor oder danach:\n'
@@ -417,19 +474,20 @@ with tab_find:
 
     category = st.text_input(
         "Produkt / Kategorie",
-        value="ERP-Software, Web-Version",
+        value="Cloudfähiges, KI-gestütztes Unternehmenssystem (ERP-Nachfolger), das das Unternehmen versteht",
         key="gen_category",
     )
 
     ATTR_PRESETS = [
+        "versteht das Unternehmen", "Erkenntnis/Einsicht", "Intelligenz", "Echtzeit",
         "Zukunft", "Sicherheit", "coole/moderne Technik", "inhabergeführt",
-        "solide/verlässlich", "erstklassiger Service", "Effizienz",
-        "Wachstum", "Klarheit", "Vertrauen",
+        "solide/verlässlich", "erstklassiger Service", "Klarheit", "Vertrauen",
+        "Abgrenzung von klassischem ERP",
     ]
     attributes = st.multiselect(
         "Werte / Assoziationen",
         options=ATTR_PRESETS,
-        default=["Zukunft", "Sicherheit", "coole/moderne Technik", "solide/verlässlich"],
+        default=["versteht das Unternehmen", "Erkenntnis/Einsicht", "Zukunft", "coole/moderne Technik", "solide/verlässlich"],
         key="gen_attrs",
     )
     attr_extra = st.text_input("Weitere Assoziationen (optional, kommagetrennt)", value="", key="gen_attr_extra")
@@ -451,8 +509,17 @@ with tab_find:
             key="gen_styles",
         )
 
+    st.markdown("**Namensregeln (Gesellschafter-Feedback)**")
+    colr1, colr2 = st.columns(2)
+    with colr1:
+        open_vowels = st.checkbox('Offene Vokale – kein „o“ als einziger Vokal (Frank)', value=True, key="gen_open")
+        no_erp = st.checkbox('„ERP“ nicht im Namen (Frank)', value=True, key="gen_noerp")
+    with colr2:
+        show_house = st.checkbox("Marktform mit Hausmarke zeigen (Stefan/Peter)", value=True, key="gen_house")
+        house_mark = st.text_input("Hausmarke", value="eEvolution", key="gen_housemark")
+
     pool = st.slider("Wie viele Ideen generieren?", min_value=8, max_value=30, value=18, key="gen_pool",
-                     help="Jeder Name kostet eine Signa-Abfrage (Freikontingent beachten).")
+                     help="Jeder überlebende Name kostet eine Signa-Abfrage (Freikontingent beachten).")
 
     gen_btn = st.button("✨ Namen generieren & prüfen", key="gen_run")
 
@@ -464,6 +531,8 @@ with tab_find:
             "nogo": nogo.strip(),
             "language": language,
             "styles": styles,
+            "open_vowels": open_vowels,
+            "no_erp": no_erp,
         }
 
         with st.spinner("Generiere Namen mit der KI…"):
@@ -473,6 +542,23 @@ with tab_find:
             st.stop()
         if not cands:
             st.warning("Keine verwertbaren Vorschläge erhalten. Bitte Brief anpassen und erneut versuchen.")
+            st.stop()
+
+        n_generated = len(cands)
+
+        # 0) Namensregeln (Gesellschafter-Feedback) VOR dem Marken-Check
+        kept, dropped_naming = [], []
+        for c in cands:
+            hard, soft = naming_issues(c["name"], open_vowels=brief["open_vowels"], no_erp=brief["no_erp"])
+            c["tags"] = soft
+            if hard:
+                c["naming_reasons"] = hard
+                dropped_naming.append(c)
+            else:
+                kept.append(c)
+        cands = kept
+        if not cands:
+            st.warning("Alle Vorschläge wurden von den Namensregeln aussortiert. Bitte Regeln lockern oder erneut generieren.")
             st.stop()
 
         # 1) Marken-Knockout
@@ -507,29 +593,47 @@ with tab_find:
 
         st.markdown(f"""
         <div class="summary-box">
-          <div><span style="font-size:1.5rem;font-weight:700;color:#2D3561;">{len(cands)}</span><br>
+          <div><span style="font-size:1.5rem;font-weight:700;color:#2D3561;">{n_generated}</span><br>
                <span style="font-size:0.8rem;color:#718096;">generiert</span></div>
           <div><span style="font-size:1.5rem;font-weight:700;color:#38A169;">{len(survivors)}</span><br>
                <span style="font-size:0.8rem;color:#718096;">überlebt</span></div>
           <div><span style="font-size:1.5rem;font-weight:700;color:#E53E3E;">{len(dropped)}</span><br>
-               <span style="font-size:0.8rem;color:#718096;">verworfen (Kollision)</span></div>
+               <span style="font-size:0.8rem;color:#718096;">Marken-K.o.</span></div>
+          <div><span style="font-size:1.5rem;font-weight:700;color:#975A16;">{len(dropped_naming)}</span><br>
+               <span style="font-size:0.8rem;color:#718096;">Regel-K.o.</span></div>
           <div style="margin-left:auto;font-size:0.78rem;color:#A0AEC0;align-self:center;">
             EUIPO · Nizza 9, 42
           </div>
         </div>
         """, unsafe_allow_html=True)
 
+        if dropped_naming:
+            with st.expander(f"{len(dropped_naming)} per Namensregel aussortiert"):
+                for c in dropped_naming:
+                    st.markdown("- **" + c["name"] + "** — " + ", ".join(c.get("naming_reasons", [])))
+        if dropped:
+            with st.expander(f"{len(dropped)} wegen Marken-Kollision verworfen"):
+                for c in dropped:
+                    st.markdown("- **" + c["name"] + "** — " + c["tm_summary"])
+
         if not survivors:
-            st.info("Alle Vorschläge hatten aktive Marken-Kollisionen. Bitte Brief anpassen und erneut generieren.")
+            st.info("Keine sauberen Kandidaten übrig. Bitte Brief/Regeln anpassen und erneut generieren.")
         else:
             for c in survivors:
                 tm_pill_class = {"clear": "pill-green", "warn": "pill-yellow", "unknown": "pill-gray"}.get(c["tm_css"], "pill-gray")
+                marktform = ""
+                if show_house and house_mark.strip():
+                    marktform = f"<div class='meta'>Marktform: <strong>{house_mark.strip()} {c['name']}</strong></div>"
+                tagline = ""
+                if c.get("tags"):
+                    tagline = "<div class='meta' style='color:#975A16;'>⚠ " + "; ".join(c["tags"]) + "</div>"
                 st.markdown(f"""
                 <div class="name-card">
                   <h3>{c['name']}
                     <span class="status-pill {tm_pill_class}" style="vertical-align:middle;">{c['tm_label']}</span>
                   </h3>
                   <div class="meta">{('· ' + c['family'] + ' ') if c['family'] else ''}{c['rationale']}</div>
+                  {marktform}{tagline}
                   <div style="margin-top:0.5rem;">{domains_html(c.get('domains', {}))}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -543,12 +647,15 @@ with tab_find:
             rows = []
             for c in survivors:
                 doms = c.get("domains", {})
+                marktform_txt = f"{house_mark.strip()} {c['name']}" if (show_house and house_mark.strip()) else ""
                 rows.append({
                     "Name": c["name"],
+                    "Marktform": marktform_txt,
                     "Familie": c["family"],
                     "Begründung": c["rationale"],
                     "Marken-Bewertung": c["tm_label"],
                     "Marken-Detail": c["tm_summary"],
+                    "Hinweis": "; ".join(c.get("tags", [])),
                     ".com": doms.get("com", ""),
                     ".de": doms.get("de", ""),
                     ".io": doms.get("io", ""),
