@@ -61,6 +61,7 @@ st.markdown("""
   .pill-green  { background: #C6F6D5; color: #276749; }
   .pill-yellow { background: #FEFCBF; color: #975A16; }
   .pill-gray   { background: #EDF2F7; color: #4A5568; }
+  .pill-blue   { background: #E2E8F0; color: #2B6CB0; }
 
   .meta { font-size: 0.8rem; color: #718096; margin-top: 0.2rem; }
 
@@ -87,14 +88,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Signa API
+# ---------------------------------------------------------------------------
+# Signa API config
+# ---------------------------------------------------------------------------
 SIGNA_URL = "https://api.signa.so/v1/trademarks"
+
+# Verfügbare Ämter bei Signa (Stand der Doku): USPTO, EUIPO, WIPO (Madrid).
+# WICHTIG: Nationale DE-Marken (DPMA) sind NICHT enthalten — diese Lücke
+# bleibt bewusst der anwaltlichen Recherche vorbehalten.
+# EUIPO deckt EU-Unionsmarken inkl. EU-Designationen aus dem Madrid-System ab.
+# WIPO ergänzt internationale Registrierungen (IR) aus dem Madrid-Protokoll.
+OFFICE_CHOICES = {
+    "EUIPO – EU-Unionsmarken (inkl. EU-Madrid-Designationen)": "euipo",
+    "WIPO – Internationale Registrierungen (Madrid, IR)": "wipo",
+}
+DEFAULT_OFFICES = ["euipo"]
+
+# --- Suchmodus -------------------------------------------------------------
+# Signa unterstützt laut Doku vier Strategien: exact / fuzzy / phonetic / prefix.
+# Wir wollen bewusst auch KLANGLICH und TIPPFEHLER-ÄHNLICHE Marken finden
+# (z. B. "Horizon" vs. "Horyzen"), nicht nur identische Schreibweisen.
+#
+# HINWEIS: Der exakte Request-Parametername konnte ohne Live-API-Key nicht
+# final verifiziert werden. Wir senden ihn bevorzugt mit; lehnt die API ihn
+# mit HTTP 400 ab, wiederholen wir die Anfrage automatisch ohne ihn
+# (Kompatibilitätsmodus). Bei Bedarf hier an die echte Doku anpassen:
+STRATEGY_PARAM = "search_type"            # ggf. anpassen: z.B. "match"/"strategies"
+STRATEGY_VALUE = "exact,fuzzy,phonetic"   # breite Trefferabdeckung
+EXACT_SCORE_THRESHOLD = 90                # relevance_score >= X  => Kollision
+SIMILAR_SCORE_FLOOR   = 60                # darunter: als Rauschen ignorieren
 
 ACTIVE_STATUSES = {"active", "registered", "published", "filed", "pending"}
 
 STATUS_LABELS = {
-    "active":     ("🟢 Aktiv/Eingetragen", "pill-red"),
-    "registered": ("🟢 Eingetragen",       "pill-red"),
+    # Aktive/eingetragene Marken sind KOLLISIONSRISIKO -> rotes Icon.
+    "active":     ("🔴 Aktiv/Eingetragen", "pill-red"),
+    "registered": ("🔴 Eingetragen",       "pill-red"),
     "published":  ("🟡 Veröffentlicht",    "pill-yellow"),
     "filed":      ("🟡 Angemeldet",        "pill-yellow"),
     "pending":    ("🟡 Ausstehend",        "pill-yellow"),
@@ -105,35 +134,85 @@ STATUS_LABELS = {
 }
 
 
-def query_signa(name: str, nice_classes: list[int]) -> list[dict] | None:
+def _get_relevance(tm: dict):
+    """Relevance-Score (0-100) falls die API ihn liefert, sonst None."""
+    rel = tm.get("relevance_score")
+    if isinstance(rel, (int, float)):
+        return rel
+    return None
+
+
+def _get_strategies(tm: dict) -> list[str]:
+    """Welche Match-Strategien haben getroffen (exact/fuzzy/phonetic/...)."""
+    me = tm.get("match_explanation") or {}
+    strat = me.get("strategies_matched")
+    return [s.lower() for s in strat] if isinstance(strat, list) else []
+
+
+def _is_exact_like(tm: dict) -> bool:
+    """True wenn Treffer identisch/sehr nah ist (=> echte Kollision).
+
+    Fällt zurück auf 'True', wenn die API keine Score-/Strategie-Infos
+    liefert — dann verhält sich das Tool wie zuvor (jeder aktive Treffer =
+    Kollision), statt eine Ähnlichkeit fälschlich zu verharmlosen.
+    """
+    strat = _get_strategies(tm)
+    rel = _get_relevance(tm)
+    if strat:
+        if "exact" in strat and rel is None:
+            return True
+        if rel is not None:
+            return rel >= EXACT_SCORE_THRESHOLD and "exact" in strat
+        # nur fuzzy/phonetic getroffen -> ähnlich, nicht identisch
+        return False
+    if rel is not None:
+        return rel >= EXACT_SCORE_THRESHOLD
+    return True  # keine Infos -> konservativ als Kollision behandeln
+
+
+def query_signa(name: str, nice_classes: list[int], offices: list[str]) -> list[dict] | None:
     """Query Signa API. Returns list of hits, empty list if none, None on error."""
     api_key = st.secrets.get("SIGNA_API_KEY", "")
     if not api_key:
         st.error("API-Key fehlt. Bitte in den App-Settings unter Secrets eintragen: SIGNA_API_KEY = \"sig_...\"")
         return None
 
-    params = {
+    base_params = {
         "q": name,
-        "offices": "euipo",
-        "limit": 20,
+        "offices": ",".join(offices) if offices else "euipo",
+        "limit": 30,
     }
     if nice_classes:
-        params["nice_classes"] = ",".join(str(c) for c in nice_classes)
+        base_params["nice_classes"] = ",".join(str(c) for c in nice_classes)
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Erst mit Ähnlichkeits-Strategie versuchen (sofern noch nicht als
+    # inkompatibel erkannt), sonst direkt im Kompatibilitätsmodus.
+    use_strategy = st.session_state.get("signa_strategy_ok", True)
+    params = dict(base_params)
+    if use_strategy:
+        params[STRATEGY_PARAM] = STRATEGY_VALUE
 
     try:
-        r = requests.get(
-            SIGNA_URL,
-            params=params,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
-        )
+        r = requests.get(SIGNA_URL, params=params, headers=headers, timeout=12)
+
+        # API akzeptiert den Strategie-Parameter nicht -> einmal ohne wiederholen
+        if r.status_code == 400 and use_strategy:
+            st.session_state["signa_strategy_ok"] = False
+            st.session_state["signa_compat_note"] = True
+            r = requests.get(SIGNA_URL, params=base_params, headers=headers, timeout=12)
+
         if r.status_code == 401:
             st.error("API-Key ungültig. Bitte in den App-Settings unter Secrets prüfen.")
             return None
         if r.status_code != 200:
             return None
         data = r.json()
-        return data.get("data", [])
+        hits = data.get("data", [])
+        # Nach Relevanz sortieren (falls vorhanden), sonst Reihenfolge lassen
+        hits.sort(key=lambda h: (_get_relevance(h) or 0), reverse=True)
+        return hits
     except Exception:
         return None
 
@@ -141,12 +220,27 @@ def query_signa(name: str, nice_classes: list[int]) -> list[dict] | None:
 def classify_result(hits: list[dict] | None) -> tuple[str, str, str]:
     if hits is None:
         return "Fehler", "warn", "API nicht erreichbar"
+
     active = [h for h in hits if (h.get("status", {}).get("primary", "") or "").lower() in ACTIVE_STATUSES]
+    # sehr schwache Treffer (nur Rauschen aus fuzzy/phonetic) ausblenden
+    active = [
+        h for h in active
+        if (_get_relevance(h) is None or _get_relevance(h) >= SIMILAR_SCORE_FLOOR)
+    ]
+
     if not active:
         if hits:
             return "Nur inaktive", "warn", f"{len(hits)} abgelaufene/zurückgezogene Einträge"
-        return "Frei ✓", "clear", "Kein Treffer in EUIPO"
-    return "Kollision", "hit", f"{len(active)} aktive(r) Eintrag/Einträge"
+        return "Frei ✓", "clear", "Kein Treffer im Register"
+
+    exact_like = [h for h in active if _is_exact_like(h)]
+    similar    = [h for h in active if not _is_exact_like(h)]
+
+    if exact_like:
+        extra = f" + {len(similar)} ähnliche" if similar else ""
+        return "Kollision", "hit", f"{len(exact_like)} identische/aktive Marke(n){extra}"
+    # nur ähnliche aktive Treffer -> juristisch prüfen
+    return "Ähnlich – prüfen", "warn", f"{len(similar)} klanglich/schriftbildlich ähnliche aktive Marke(n)"
 
 
 def render_hit(tm: dict) -> str:
@@ -155,21 +249,38 @@ def render_hit(tm: dict) -> str:
     name_val  = tm.get("mark_text", "-")
     owner     = tm.get("owner_name", "-") or "-"
     app_date  = (tm.get("filing_date", "") or "")[:10]
+    office    = (tm.get("office", "") or "").upper()
     classes   = ", ".join(
         str(c.get("nice_class", "")) for c in (tm.get("classifications") or [])
     )
+
+    # Match-Info (Relevanz + Strategie), falls von der API geliefert
+    rel = _get_relevance(tm)
+    strat = _get_strategies(tm)
+    match_bits = []
+    if rel is not None:
+        match_bits.append(f"Relevanz {int(rel)}%")
+    if strat:
+        pretty = {"exact": "identisch", "fuzzy": "ähnlich", "phonetic": "klanglich", "prefix": "Präfix"}
+        match_bits.append("/".join(pretty.get(s, s) for s in strat))
+    match_pill = ""
+    if match_bits:
+        match_pill = f"<span class='status-pill pill-blue'>{' · '.join(match_bits)}</span>"
+
     tm_id = tm.get("id", "")
     euipo_link = ""
-    if tm_id:
+    if tm_id and office == "EUIPO":
         euipo_link = f"&nbsp;|&nbsp; <a href='https://euipo.europa.eu/eSearch/#details/trademarks/{tm_id}' target='_blank'>EUIPO ↗</a>"
+
+    office_tag = f" &nbsp;|&nbsp; {office}" if office else ""
 
     return f"""
 <div style="background:#F7FAFC;border-radius:8px;padding:0.6rem 0.9rem;margin:0.4rem 0;
             font-size:0.83rem;border:1px solid #E2E8F0;">
-  <span class="status-pill {pill_class}">{status_label}</span>
+  <span class="status-pill {pill_class}">{status_label}</span>{match_pill}
   <strong>{name_val}</strong><br>
   <span class="meta">👤 {owner} &nbsp;|&nbsp; 📅 {app_date or '-'}
-  &nbsp;|&nbsp; Nizza: {classes or '-'}{euipo_link}</span>
+  &nbsp;|&nbsp; Nizza: {classes or '-'}{office_tag}{euipo_link}</span>
 </div>
 """
 
@@ -179,7 +290,8 @@ st.markdown("""
 <div class="hero">
   <div class="badge">EUIPO · EU-Markenregister</div>
   <h1>🔍 Markenprüfung EU</h1>
-  <p>Schnellcheck gegen das Unionsmarkenregister — für eine erste Einschätzung vor der Agentur-Beauftragung.</p>
+  <p>Schnellcheck gegen das Unionsmarkenregister — inkl. klanglich/ähnlicher Treffer.
+     Für eine erste Einschätzung vor der Agentur-Beauftragung.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -199,6 +311,14 @@ nice_filter = st.multiselect(
     default=[9, 42],
     help="Klasse 9 = Software, Klasse 42 = IT-Dienstleistungen.",
 )
+
+office_labels = st.multiselect(
+    "Register / Ämter",
+    options=list(OFFICE_CHOICES.keys()),
+    default=[k for k, v in OFFICE_CHOICES.items() if v in DEFAULT_OFFICES],
+    help="Nationale DE-Marken (DPMA) sind bei dieser Datenquelle NICHT enthalten.",
+)
+offices = [OFFICE_CHOICES[l] for l in office_labels] or DEFAULT_OFFICES
 
 col1, col2 = st.columns([2, 1])
 with col1:
@@ -232,7 +352,7 @@ if run:
 
     for i, name in enumerate(names):
         progress.progress((i + 1) / len(names), text=f"Pruefe {name}...")
-        hits = query_signa(name, nice_filter)
+        hits = query_signa(name, nice_filter, offices)
         if hits is None:
             # Error already shown by query_signa
             st.stop()
@@ -249,6 +369,14 @@ if run:
 
     progress.empty()
 
+    # Hinweis, falls die API im Kompatibilitätsmodus lief (kein Ähnlichkeits-Match)
+    if st.session_state.get("signa_compat_note"):
+        st.warning(
+            "Hinweis: Die API hat den Ähnlichkeits-Parameter nicht akzeptiert — "
+            "es wurde nur nach (nahezu) identischen Namen gesucht. "
+            f"Parametername in app.py prüfen (STRATEGY_PARAM = \"{STRATEGY_PARAM}\")."
+        )
+
     # Summary bar
     n_hit   = sum(1 for r in results if r["css_class"] == "hit")
     n_warn  = sum(1 for r in results if r["css_class"] == "warn")
@@ -264,7 +392,7 @@ if run:
            <span style="font-size:0.8rem;color:#718096;">Frei</span></div>
       <div style="margin-left:auto;font-size:0.78rem;color:#A0AEC0;align-self:center;">
         Nizza {', '.join(str(c) for c in nice_filter) if nice_filter else 'alle'}<br>
-        EUIPO · {len(results)} Namen
+        {', '.join(o.upper() for o in offices)} · {len(results)} Namen
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -282,12 +410,12 @@ if run:
                 if len(r["hits"]) > 8:
                     st.caption(f"... und {len(r['hits'])-8} weitere Treffer.")
             else:
-                st.success("Kein Treffer im EUIPO-Register.")
+                st.success("Kein Treffer im Register.")
 
             esearch_url = f"https://euipo.europa.eu/eSearch/#basic/trademarks/name,Boolean/{quote(r['name'])}"
             st.markdown(f"[Direkt in EUIPO eSearch öffnen ↗]({esearch_url})")
 
-    # CSV Export
+    # Excel Export
     st.markdown("---")
     export_rows = []
     for r in results:
@@ -297,11 +425,15 @@ if run:
                 classes = ", ".join(
                     str(c.get("nice_class", "")) for c in (tm.get("classifications") or [])
                 )
+                rel = _get_relevance(tm)
                 export_rows.append({
                     "Geprüfter Name": r["name"],
                     "Bewertung":      r["label"],
                     "Treffer-Marke":  tm.get("mark_text", ""),
                     "Status":         status_raw,
+                    "Match":          "/".join(_get_strategies(tm)) or "",
+                    "Relevanz":       int(rel) if rel is not None else "",
+                    "Amt":            (tm.get("office", "") or "").upper(),
                     "Inhaber":        tm.get("owner_name", ""),
                     "Anmeldedatum":   (tm.get("filing_date", "") or "")[:10],
                     "Nizza-Klassen":  classes,
@@ -313,6 +445,9 @@ if run:
                 "Bewertung":      r["label"],
                 "Treffer-Marke":  "",
                 "Status":         "",
+                "Match":          "",
+                "Relevanz":       "",
+                "Amt":            "",
                 "Inhaber":        "",
                 "Anmeldedatum":   "",
                 "Nizza-Klassen":  "",
@@ -334,7 +469,8 @@ if run:
 # Footer
 st.markdown("""
 <div class="disclaimer">
-  Datenquelle: EUIPO Unionsmarkenregister via Signa API (EU-weit gültige Marken).<br>
+  Datenquelle: EUIPO Unionsmarkenregister (+ optional WIPO/Madrid) via Signa API.<br>
+  <strong>Nationale DE-Marken (DPMA) sind nicht enthalten.</strong>
   Dieser Schnellcheck ersetzt <strong>keine</strong> rechtliche Markenrecherche.
   Für eine rechtsverbindliche Prüfung: spezialisierte Agentur (Nomen, Namestorm) oder Markenanwalt.
 </div>
