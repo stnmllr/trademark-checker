@@ -122,7 +122,17 @@ EXACT_SCORE_THRESHOLD = 90   # relevance_score >= X  => Kollision
 SIMILAR_SCORE_FLOOR   = 60   # darunter: als Rauschen ignorieren
 
 # LLM-Modell für die Namensgenerierung (per Secret überschreibbar).
-LLM_MODEL = st.secrets.get("LLM_MODEL", "claude-haiku-4-5")
+# Standard bewusst ein stärkeres Modell — Namensfindung lebt von Kreativität,
+# das günstige Haiku liefert zu brave/generische Vorschläge.
+LLM_MODEL = st.secrets.get("LLM_MODEL", "claude-sonnet-5")
+
+# Ausgelutschte Tech-Namen-Klischees, die die KI meiden soll (fast alle längst vergeben).
+NAME_CLICHES = (
+    "Artemis, Apollo, Helios, Atlas, Aurora, Nova, Terra, Luna, Lumina, Luminae, Aura, Solaris, "
+    "Nexus, Vertex, Zenith, Apex, Prism, Pulse, Pulsar, Quantum, Synergy, Catalyst, Momentum, "
+    "Veridian, Acuity, Cognita, Cognition, Insightia, Qualia, Aether, Sapient, Lucid, Lucida, Clarity, "
+    "Vibe, Flow, Core, Cloud, Logic, Sense, Mind, Cerebra, Synapse, Cortex"
+)
 
 # Produktvision (Gesellschafter-Abstimmung) — fließt in jeden Namens-Brief ein.
 PRODUCT_VISION = (
@@ -353,9 +363,41 @@ def build_prompt(brief: dict, n: int) -> str:
     if brief.get("nogo"):
         lines.append("Vermeide diese Wörter/Bedeutungen: " + brief["nogo"])
     lines.append("Produktvision: " + PRODUCT_VISION)
+    lines.append(
+        "WICHTIG: Übersetze diese Vision NICHT wörtlich in Namen. Genau das führt zu "
+        "ausgelutschten Latein-/Griechisch-Wörtern für Wissen, Licht, Geist oder Wahrheit "
+        "(Cognita, Lumina, Acuity, Qualia, Insightia …). Solche Namen sind verboten."
+    )
     lines.append("Sprache: " + brief.get("language", "international"))
     if brief.get("styles"):
         lines.append("Bevorzugter Stil: " + ", ".join(brief["styles"]))
+    if brief.get("liked"):
+        lines.append(
+            "Der Kunde mag den Stil von: " + brief["liked"] + ". "
+            "Triff genau diese Anmutung — konkret, bildhaft, besitzbar, aus echten Wörtern "
+            "zusammengesetzt (wie 'Trueforge' = wahr + schmieden) — ohne das Vorbild zu kopieren."
+        )
+
+    # Kreativitäts-Techniken erzwingen (gegen den generischen KI-Standard)
+    lines.append(
+        "Erzeuge bewusst VIELFALT über diese Konstruktionsprinzipien und verteile die Vorschläge "
+        "darüber (nicht alle nach einem Schema):"
+    )
+    lines.append("1) Konkrete Zusammensetzungen zweier echter Wörter, bildhaft & besitzbar (im Geist von 'Trueforge': Handwerk, Aufbau, Stärke, Struktur).")
+    lines.append("2) Leicht abgewandelte echte Wörter (ein Buchstabe/eine Silbe verschoben), sodass sie eigenständig und markenfähig werden.")
+    lines.append("3) Metaphern aus UNerwarteten Domänen — Schmiedekunst, Seefahrt, Geologie, Architektur, Musik, Mechanik/Getriebe — NICHT die üblichen Licht-/Gehirn-/Sternen-Bilder.")
+    lines.append("4) Gut klingende, leicht aussprechbare Lehnwörter aus selteneren Sprachen (nordisch, finnisch, japanisch, baskisch).")
+    lines.append("5) Kurze, kantige Kunstwörter mit markantem Konsonanten-Rhythmus (kein weiches -ia/-us/-a-Standardmuster).")
+
+    lines.append(
+        "Verboten sind diese Klischees und alles, was ihnen stark ähnelt: " + NAME_CLICHES + ". "
+        "Ebenso verboten: griechische/römische Götternamen und generische Endungen wie -ia, -ify, -ly, -ex, -ion, wenn sie beliebig wirken."
+    )
+    lines.append(
+        "Jeder Name soll wie ein eigenständiger Produktname wirken, den man als Marke besitzen kann — "
+        "nicht wie ein Wörterbuch- oder Mythologie-Eintrag. Wenn ein Name sich anfühlt, als hätte ihn "
+        "schon jemand, verwirf ihn selbst."
+    )
 
     # Harte/weiche Regeln aus dem Gesellschafter-Feedback
     rules = [
@@ -377,7 +419,7 @@ def build_prompt(brief: dict, n: int) -> str:
     )
     rules.append("grenze dich klar von klassischem ERP-Sprech und Microsoft Business Central ab")
     lines.append("Regeln: " + "; ".join(rules) + ".")
-    lines.append("Mische verschiedene Familien (Kunstwörter, wertig-latinisiert, tech-modern, Metaphern).")
+    lines.append("Sorge dafür, dass die Vorschläge sichtbar über die Prinzipien 1–5 verteilt sind, nicht alle im selben Muster.")
     lines.append(
         'Antworte AUSSCHLIESSLICH mit reinem JSON in genau diesem Format, '
         'ohne Text davor oder danach:\n'
@@ -412,7 +454,7 @@ def parse_candidates(text: str) -> list[dict]:
     return out
 
 
-def generate_names(brief: dict, n: int) -> list[dict] | None:
+def generate_names(brief: dict, n: int, temperature: float = 1.0) -> list[dict] | None:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         st.error("ANTHROPIC_API_KEY fehlt. Bitte in den Streamlit-Secrets eintragen.")
@@ -425,13 +467,15 @@ def generate_names(brief: dict, n: int) -> list[dict] | None:
 
     client = anthropic.Anthropic(api_key=api_key)
     system = (
-        "Du bist ein erfahrener Namens- und Branding-Experte für B2B-Software. "
-        "Du lieferst kreative, aber seriöse Produktnamen und antwortest strikt im geforderten JSON-Format."
+        "Du bist ein preisgekrönter Namensentwickler für Marken und B2B-Software. "
+        "Du hasst generische, austauschbare KI-Namen und lieferst eigenständige, besitzbare, "
+        "überraschende Produktnamen. Du antwortest strikt im geforderten JSON-Format."
     )
     try:
         msg = client.messages.create(
             model=LLM_MODEL,
             max_tokens=2000,
+            temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": build_prompt(brief, n)}],
         )
@@ -524,6 +568,17 @@ with tab_find:
             key="gen_styles",
         )
 
+    liked = st.text_input(
+        "Vorbild – Namen, deren Stil dir gefällt (optional)",
+        value="Trueforge",
+        help="Die KI trifft diese Anmutung (konkret, bildhaft, besitzbar), ohne zu kopieren.",
+        key="gen_liked",
+    )
+    creativity = st.slider(
+        "Kreativität", min_value=0.6, max_value=1.0, value=0.95, step=0.05, key="gen_creativity",
+        help="Höher = mutigere, ungewöhnlichere Namen. Modell via Secret LLM_MODEL (Standard: claude-sonnet-5).",
+    )
+
     st.markdown("**Namensregeln (Gesellschafter-Feedback)**")
     colr1, colr2 = st.columns(2)
     with colr1:
@@ -546,12 +601,13 @@ with tab_find:
             "nogo": nogo.strip(),
             "language": language,
             "styles": styles,
+            "liked": liked.strip(),
             "open_vowels": open_vowels,
             "no_erp": no_erp,
         }
 
         with st.spinner("Generiere Namen mit der KI…"):
-            cands = generate_names(brief, pool)
+            cands = generate_names(brief, pool, temperature=creativity)
 
         if cands is None:
             st.stop()
