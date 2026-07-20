@@ -420,6 +420,15 @@ def build_prompt(brief: dict, n: int) -> str:
     rules.append("grenze dich klar von klassischem ERP-Sprech und Microsoft Business Central ab")
     lines.append("Regeln: " + "; ".join(rules) + ".")
     lines.append("Sorge dafür, dass die Vorschläge sichtbar über die Prinzipien 1–5 verteilt sind, nicht alle im selben Muster.")
+
+    # Kreativitätsgrad als verbale Anweisung (temperature wird von neuen Modellen nicht mehr unterstützt)
+    crea = brief.get("creativity", 0.9)
+    if crea >= 0.9:
+        lines.append("Kreativitätsgrad: SEHR MUTIG. Lieber überraschend und ungewöhnlich als brav; riskiere eigenwillige, kantige Namen.")
+    elif crea >= 0.75:
+        lines.append("Kreativitätsgrad: kreativ, aber ausgewogen und solide.")
+    else:
+        lines.append("Kreativitätsgrad: eher konservativ, klar und sofort zugänglich.")
     lines.append(
         'Antworte AUSSCHLIESSLICH mit reinem JSON in genau diesem Format, '
         'ohne Text davor oder danach:\n'
@@ -454,7 +463,7 @@ def parse_candidates(text: str) -> list[dict]:
     return out
 
 
-def generate_names(brief: dict, n: int, temperature: float = 1.0) -> list[dict] | None:
+def generate_names(brief: dict, n: int) -> list[dict] | None:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         st.error("ANTHROPIC_API_KEY fehlt. Bitte in den Streamlit-Secrets eintragen.")
@@ -475,7 +484,6 @@ def generate_names(brief: dict, n: int, temperature: float = 1.0) -> list[dict] 
         msg = client.messages.create(
             model=LLM_MODEL,
             max_tokens=2000,
-            temperature=temperature,
             system=system,
             messages=[{"role": "user", "content": build_prompt(brief, n)}],
         )
@@ -602,12 +610,13 @@ with tab_find:
             "language": language,
             "styles": styles,
             "liked": liked.strip(),
+            "creativity": creativity,
             "open_vowels": open_vowels,
             "no_erp": no_erp,
         }
 
         with st.spinner("Generiere Namen mit der KI…"):
-            cands = generate_names(brief, pool, temperature=creativity)
+            cands = generate_names(brief, pool)
 
         if cands is None:
             st.stop()
