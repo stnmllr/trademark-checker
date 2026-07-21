@@ -333,7 +333,29 @@ def naming_issues(name: str, open_vowels: bool = True, no_erp: bool = True) -> t
     if compact.startswith("no"):
         soft.append("beginnt mit 'No-' (mögliche Verneinungs-Assoziation)")
 
+    # Trend-Suffix '-ai' (wirkt schnell abgestanden)
+    if compact.endswith("ai"):
+        hard.append("Trend-Suffix '-ai'")
+
     return hard, soft
+
+
+def _limit_clusters(cands: list[dict], keylen: int = 4) -> tuple[list[dict], list[dict]]:
+    """Begrenzt Namen mit gleichem Präfix/Suffix auf je einen (gegen True-/-frame-Häufung)."""
+    seen_pre, seen_suf = set(), set()
+    kept, dropped = [], []
+    for c in cands:
+        s = slugify(c["name"])
+        if len(s) >= keylen:
+            pre, suf = s[:keylen], s[-keylen:]
+            if pre in seen_pre or suf in seen_suf:
+                c["naming_reasons"] = c.get("naming_reasons", []) + ["Cluster (gleiches Präfix/Suffix)"]
+                dropped.append(c)
+                continue
+            seen_pre.add(pre)
+            seen_suf.add(suf)
+        kept.append(c)
+    return kept, dropped
 
 
 def check_domain(fqdn: str) -> str:
@@ -384,8 +406,9 @@ def build_prompt(brief: dict, n: int) -> str:
     if brief.get("liked"):
         lines.append(
             "Der Kunde mag den Stil von: " + brief["liked"] + ". "
-            "Triff genau diese Anmutung — konkret, bildhaft, besitzbar, aus echten Wörtern "
-            "zusammengesetzt (wie 'Trueforge' = wahr + schmieden) — ohne das Vorbild zu kopieren."
+            "Triff diese Anmutung — konkret, bildhaft, besitzbar, meist aus echten Wörtern "
+            "zusammengesetzt (z. B. 'Trueforge' = wahr+schmieden, 'deepMerge' = tief+zusammenführen) — "
+            "ohne die Vorbilder zu kopieren."
         )
 
     # Kreativitäts-Techniken erzwingen (gegen den generischen KI-Standard)
@@ -398,7 +421,16 @@ def build_prompt(brief: dict, n: int) -> str:
     lines.append("3) Metaphern aus unerwarteten, aber SERIÖSEN Domänen — Architektur, Geologie/Schichten, Kartografie/Navigation, Mechanik/Getriebe, Statik — NICHT die üblichen Licht-/Gehirn-/Sternen-Bilder.")
     lines.append("4) Ruhige, klare Neuschöpfungen aus einer echten Wortwurzel (Latein/Deutsch/Englisch), professionell und leicht lesbar.")
     lines.append("5) Kurze, klare Kunstwörter mit ruhigem, seriösem Klang — NICHT rau/kantig, NICHT wie erfundene Fantasy-Namen.")
-    lines.append("Nicht mehrere Namen mit demselben Suffix (nicht mehrfach -forge, -craft, -wise, -frame, -line).")
+    lines.append("6) Tech-literate Zusammenführungs-Begriffe (im Geist von 'deepMerge'): das Verschmelzen/Verweben vieler Teile zu einem verstehenden Ganzen (merge, weave, mesh, converge, join) — seriös, nicht verspielt.")
+    lines.append(
+        "Gewichte das Emergenz-/Zusammenführungs-Motiv (aus vielen Teilen entsteht ein verstehendes Ganzes) "
+        "STÄRKER als reine Stabilitäts-/Fundament-Bilder. Höchstens ein Drittel darf primär "
+        "'solide/verlässlich/Fundament' transportieren."
+    )
+    lines.append(
+        "Keine gehäuften gleichen Präfixe ODER Suffixe (nicht mehrfach True-, Deep-, -forge, -frame, -wise, "
+        "-line, -merge); höchstens EIN Name mit 'True'. Kein Name darf auf '-ai' enden."
+    )
 
     lines.append(
         "Verboten sind diese Klischees und alles, was ihnen stark ähnelt: " + NAME_CLICHES + ". "
@@ -655,7 +687,7 @@ with tab_find:
 
     liked = st.text_input(
         "Vorbild – Namen, deren Stil dir gefällt (optional)",
-        value="Trueforge",
+        value="Trueforge, deepMerge",
         help="Die KI trifft diese Anmutung (konkret, bildhaft, besitzbar), ohne zu kopieren.",
         key="gen_liked",
     )
@@ -714,6 +746,9 @@ with tab_find:
             else:
                 kept.append(c)
         cands = kept
+        # Cluster-Sperre: gleiche Präfixe/Suffixe (True-, -frame …) auf je einen begrenzen
+        cands, cluster_dropped = _limit_clusters(cands)
+        dropped_naming += cluster_dropped
         if not cands:
             st.warning("Alle Vorschläge wurden von den Namensregeln aussortiert. Bitte Regeln lockern oder erneut generieren.")
             st.stop()
