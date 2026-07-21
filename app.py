@@ -669,10 +669,13 @@ def generate_names_diverse(brief: dict, n: int) -> list[dict] | None:
 # ---------------------------------------------------------------------------
 # Juror-Stufe: Gravitas-Vorauswahl per zweitem LLM-Call
 # ---------------------------------------------------------------------------
-JUROR_GRAVITAS_MIN = 7
-JUROR_PHONE_MIN = 7
+JUROR_GRAVITAS_FLOOR = 5   # darunter: raus
+JUROR_PHONE_FLOOR = 6      # darunter: raus
+JUROR_MIN_KEEP = 6         # nie weniger als die besten N weiterreichen
 def judge_names(cands: list[dict], brief: dict) -> tuple[list[dict], list[dict], str | None]:
     """Bewertet Kandidaten auf Flaggschiff-Gravitas + Telefontauglichkeit.
+    Rang-Logik statt harter Hürde: Böden (Gravitas/Telefon) sortieren aus, aber die
+    besten JUROR_MIN_KEEP kommen immer durch (ggf. als 'bedingt empfohlen' markiert).
     Rückgabe: (kept, dropped, warn_msg). Bei API-Fehler: alle behalten (fail open).
     """
     client = _get_anthropic_client()
@@ -680,8 +683,9 @@ def judge_names(cands: list[dict], brief: dict) -> tuple[list[dict], list[dict],
         return cands, [], "Juror übersprungen (kein API-Zugang)" if cands else None
     names_list = "\n".join(f"- {c['name']}" for c in cands)
     system = (
-        "Du bist ein extrem kritischer Markenstratege für B2B-Unternehmenssoftware im deutschen "
-        "Mittelstand. Du bewertest Produktnamen hart und ehrlich — Schmeichelei ist nutzlos."
+        "Du bist ein kritischer, aber fairer Markenstratege für B2B-Unternehmenssoftware im "
+        "deutschen Mittelstand. Du bewertest Produktnamen ehrlich und differenziert und nutzt "
+        "die VOLLE Skala von 1 bis 10 — nicht nur das untere Drittel."
     )
     prompt = (
         f"Produkt: {brief['category']}\n\n"
@@ -692,8 +696,13 @@ def judge_names(cands: list[dict], brief: dict) -> tuple[list[dict], list[dict],
         "2) telefon: Kann ein deutscher Kunde den Namen am Telefon einmal hören und sofort eindeutig "
         "richtig schreiben? 10 = genau eine plausible Schreibweise. 1 = mehrdeutig oder sieht nach "
         "Tippfehler aus.\n\n"
-        f"Kalibrierung: Namen wie 'Contourly', 'Foldwise', 'Groundmesh' wären gravitas 2-3; "
-        f"'Converj', 'Vantege' wären telefon 2-3.\n\n"
+        "Kalibrierung (wichtig, nutze die volle Skala):\n"
+        f"- Etablierte Flaggschiffe wie {ERP_BENCHMARK} selbst wären gravitas 9-10.\n"
+        "- Ein tragfähiger, ernstzunehmender Kandidat auf Augenhöhe liegt bei gravitas 6-8 — "
+        "vergib diese Werte auch, wenn ein Name das Format hat.\n"
+        "- Namen wie 'Contourly', 'Foldwise', 'Groundmesh' wären gravitas 2-3.\n"
+        "- 'Converj', 'Vantege' wären telefon 2-3; 'Sage' oder 'Vorano' wären telefon 9-10.\n"
+        "Wenn du fast nur Werte unter 5 vergibst, bewertest du falsch — differenziere.\n\n"
         f"Namen:\n{names_list}\n\n"
         "Gib die Bewertungen über das Werkzeug 'namen_bewerten' zurück."
     )
@@ -753,11 +762,28 @@ def judge_names(cands: list[dict], brief: dict) -> tuple[list[dict], list[dict],
             kept.append(c)
             continue
         c["juror"] = {"gravitas": grav, "telefon": tel, "kommentar": str(r.get("kommentar", "")).strip()}
-        if grav >= JUROR_GRAVITAS_MIN and tel >= JUROR_PHONE_MIN:
+        if grav >= JUROR_GRAVITAS_FLOOR and tel >= JUROR_PHONE_FLOOR:
             kept.append(c)
         else:
             dropped.append(c)
-    return kept, dropped, None
+    # Mindest-Durchlass: nie weniger als die besten JUROR_MIN_KEEP weiterreichen.
+    warn = None
+    if len(kept) < JUROR_MIN_KEEP and dropped:
+        dropped.sort(key=lambda c: -(c["juror"]["gravitas"] + c["juror"]["telefon"]))
+        promote = dropped[: JUROR_MIN_KEEP - len(kept)]
+        dropped = dropped[JUROR_MIN_KEEP - len(kept):]
+        for c in promote:
+            c["tags"] = c.get("tags", []) + [
+                f"Juror: nur bedingt empfohlen (Gravitas {c['juror']['gravitas']}/10, "
+                f"Telefon {c['juror']['telefon']}/10)"
+            ]
+            kept.append(c)
+        warn = (
+            f"Der Juror fand nur {len(kept) - len(promote)} Kandidat(en) überzeugend — "
+            f"die besten {len(promote)} weiteren wurden als 'bedingt empfohlen' durchgelassen. "
+            "Tipp: Pool erhöhen oder Brief/Seed-Wörter variieren."
+        )
+    return kept, dropped, warn
 def domains_html(domains: dict) -> str:
     if not domains:
         return ""
@@ -859,8 +885,9 @@ with tab_find:
         no_erp = st.checkbox('„ERP“ nicht im Namen (Frank)', value=True, key="gen_noerp")
         use_juror = st.checkbox(
             "KI-Juror: Gravitas-Vorauswahl", value=True, key="gen_juror",
-            help="Zweiter LLM-Call bewertet jeden Namen auf Flaggschiff-Gravitas (≥7/10) und "
-                 "Telefontauglichkeit (≥7/10), BEVOR Signa-Kontingent verbraucht wird.",
+            help="Zweiter LLM-Call bewertet jeden Namen auf Flaggschiff-Gravitas (≥5/10) und "
+                 "Telefontauglichkeit (≥6/10), BEVOR Signa-Kontingent verbraucht wird. "
+                 "Die besten 6 kommen immer durch (ggf. als 'bedingt empfohlen' markiert).",
         )
     with colr2:
         show_house = st.checkbox("Marktform mit Hausmarke zeigen (Stefan/Peter)", value=True, key="gen_house")
@@ -918,6 +945,14 @@ with tab_find:
                 st.warning(juror_warn)
             if not cands:
                 st.warning("Der Juror hat alle Kandidaten aussortiert. Pool erhöhen oder erneut generieren.")
+                # Scores trotzdem zeigen, damit nachvollziehbar ist, WARUM alles rausflog:
+                for c in dropped_juror:
+                    j = c.get("juror", {})
+                    st.markdown(
+                        f"- **{c['name']}** — Gravitas {j.get('gravitas', '?')}/10, "
+                        f"Telefon {j.get('telefon', '?')}/10"
+                        + (f" — {j['kommentar']}" if j.get("kommentar") else "")
+                    )
                 st.stop()
         # 1) Marken-Knockout
         prog = st.progress(0, text="Marken-Knockout…")
@@ -968,7 +1003,7 @@ with tab_find:
                 for c in dropped_naming:
                     st.markdown("- **" + c["name"] + "** — " + ", ".join(c.get("naming_reasons", [])))
         if dropped_juror:
-            with st.expander(f"{len(dropped_juror)} vom KI-Juror aussortiert (Gravitas/Telefon < {JUROR_GRAVITAS_MIN})"):
+            with st.expander(f"{len(dropped_juror)} vom KI-Juror aussortiert (Gravitas < {JUROR_GRAVITAS_FLOOR} oder Telefon < {JUROR_PHONE_FLOOR})"):
                 for c in dropped_juror:
                     j = c.get("juror", {})
                     st.markdown(
