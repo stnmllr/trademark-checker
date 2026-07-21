@@ -592,19 +592,24 @@ def parse_candidates(text: str) -> list[dict]:
     if not isinstance(data, list):
         return []
     return _normalize_items(data)
+# Selbst-verworfene Platzhalter des Modells abfangen ("Ersatz folgt" & Co.):
+_META_PAT = re.compile(r"ersatz folgt|platzhalter|placeholder|verworfen|todo|tbd", re.I)
 def _normalize_items(data: list) -> list[dict]:
     out, seen = [], set()
     for it in data:
         if not isinstance(it, dict):
             continue
         nm = str(it.get("name", "")).strip()
+        rat = str(it.get("rationale", "")).strip()
         if not nm or nm.lower() in seen:
             continue
+        if _META_PAT.search(nm) or _META_PAT.search(rat):
+            continue  # Modell hat den Vorschlag selbst verworfen -> nicht durchreichen
         seen.add(nm.lower())
         out.append({
             "name": nm,
             "family": str(it.get("family", "")).strip(),
-            "rationale": str(it.get("rationale", "")).strip(),
+            "rationale": rat,
         })
     return out
 def _get_anthropic_client():
@@ -705,7 +710,7 @@ def generate_names_diverse(brief: dict, n: int) -> list[dict] | None:
 # ---------------------------------------------------------------------------
 # Juror-Stufe: Gravitas-Vorauswahl per zweitem LLM-Call
 # ---------------------------------------------------------------------------
-JUROR_GRAVITAS_FLOOR = 5   # darunter: raus
+JUROR_GRAVITAS_FLOOR = 6   # darunter: raus (Mindest-Durchlass JUROR_MIN_KEEP bleibt als Netz)
 JUROR_PHONE_FLOOR = 6      # darunter: raus
 JUROR_MIN_KEEP = 6         # nie weniger als die besten N weiterreichen
 def judge_names(cands: list[dict], brief: dict) -> tuple[list[dict], list[dict], str | None]:
