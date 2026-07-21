@@ -286,14 +286,20 @@ def _lev(a: str, b: str) -> int:
         prev = cur
     return prev[-1]
 def competitor_clash(name: str) -> tuple[str | None, str | None]:
-    """Zu nah an bekannter ERP-/Business-Marke? -> (Marke, 'hard'|'soft')."""
+    """Zu nah an bekannter ERP-/Business-Marke? -> (Marke, 'hard'|'soft').
+    Prüft ALLE Wettbewerber und meldet den nächstgelegenen (kein Early-Return,
+    sonst verdeckt ein weicher Treffer eine exakte Kollision weiter hinten in der Liste).
+    """
     s = slugify(name)
+    best_comp, best_d = None, 99
     for comp in COMPETITOR_NAMES:
         d = _lev(s, comp)
-        if d <= 1:
-            return comp, "hard"
-        if d == 2 and len(s) <= 6:
-            return comp, "soft"
+        if d < best_d:
+            best_comp, best_d = comp, d
+    if best_comp is not None and best_d <= 1:
+        return best_comp, "hard"
+    if best_comp is not None and best_d == 2 and len(s) <= 6:
+        return best_comp, "soft"
     return None, None
 def phone_test_issues(name: str) -> tuple[list[str], list[str]]:
     """Telefontest für DE-Kunden: eindeutig schreibbar nach einmal Hören?"""
@@ -311,10 +317,11 @@ def phone_test_issues(name: str) -> tuple[list[str], list[str]]:
         soft.append("Vokalhäufung (Telefontest: unklare Schreibweise)")
     return hard, soft
 def naming_issues(name: str, open_vowels: bool = True, no_erp: bool = True,
-                  mode: str = "descriptive") -> tuple[list[str], list[str]]:
+                  mode: str = "descriptive", strict_two: bool = False) -> tuple[list[str], list[str]]:
     """Deterministische Namensregeln aus dem Gesellschafter-Feedback.
     Rückgabe: (hard_reasons, soft_tags). hard_reasons != [] => verwerfen.
     mode='abstract' aktiviert zusätzlich die Plattform-Formregeln (1 Wort, kurz, 2 Silben).
+    strict_two=True macht 'genau 2 Silben, max. 8 Buchstaben' zum harten K.o.
     """
     hard, soft = [], []
     low = name.lower().translate(_VOWEL_MAP)
@@ -349,14 +356,21 @@ def naming_issues(name: str, open_vowels: bool = True, no_erp: bool = True,
         syl = count_syllables(name)
         if len(name.split()) > 1:
             hard.append("mehr als ein Wort (Plattform-Modus: genau ein Wort)")
-        if len(slug) > 9:
-            hard.append(f"{len(slug)} Buchstaben (Plattform-Modus: max. 8-9)")
-        elif len(slug) == 9:
-            soft.append("9 Buchstaben (Ziel: max. 8)")
-        if syl > 3:
-            hard.append(f"{syl} Silben (Plattform-Modus: max. 2-3)")
-        elif syl == 3:
-            soft.append("3 Silben (Ziel: 2)")
+        if strict_two:
+            # Strenger Zweisilber (Sage/Xero-Format): genau 2 Silben, max. 8 Buchstaben — hart.
+            if len(slug) > 8:
+                hard.append(f"{len(slug)} Buchstaben (Zweisilber-Modus: max. 8)")
+            if syl != 2:
+                hard.append(f"{syl} Silbe(n) (Zweisilber-Modus: genau 2)")
+        else:
+            if len(slug) > 9:
+                hard.append(f"{len(slug)} Buchstaben (Plattform-Modus: max. 8-9)")
+            elif len(slug) == 9:
+                soft.append("9 Buchstaben (Ziel: max. 8)")
+            if syl > 3:
+                hard.append(f"{syl} Silben (Plattform-Modus: max. 2-3)")
+            elif syl == 3:
+                soft.append("3 Silben (Ziel: 2)")
     return hard, soft
 def _limit_clusters(cands: list[dict], keylen: int = 4) -> tuple[list[dict], list[dict]]:
     """Begrenzt Namen mit gleichem Präfix/Suffix auf je einen (gegen True-/-frame-Häufung)."""
@@ -471,10 +485,18 @@ def build_prompt_abstract(brief: dict, n: int, angle: str = "") -> str:
         "Echte ERP-Flaggschiffe erklären nichts — sie behaupten. KEINE bildhaft-beschreibenden "
         "Zusammensetzungen (nicht Mesh/Frame/Weave/Gear/Strata/Contour und nichts dieser Machart)."
     )
-    lines.append(
-        "FORM (hart): genau EIN Wort, maximal 8 Buchstaben, ideal 2 Silben (max. 3). "
-        "Klare Konsonant-Vokal-Struktur, offene Vokale (a, e, i), ruhiger, souveräner Klang."
-    )
+    if brief.get("strict_two"):
+        lines.append(
+            "FORM (hart, wird maschinell geprüft — Verstöße werden verworfen): genau EIN Wort, "
+            "maximal 8 Buchstaben, GENAU 2 Silben — das Sage/Xero-Format. Keine Dreisilber! "
+            "Vermeide das Schema 'Latein-Wurzel + -a/-o' (Ordena, Verita, Sinnera …) — genau davon "
+            "gibt es schon genug. Klare Konsonant-Vokal-Struktur, offene Vokale (a, e, i)."
+        )
+    else:
+        lines.append(
+            "FORM (hart): genau EIN Wort, maximal 8 Buchstaben, ideal 2 Silben (max. 3). "
+            "Klare Konsonant-Vokal-Struktur, offene Vokale (a, e, i), ruhiger, souveräner Klang."
+        )
     lines.append(
         "GRAVITAS (hart): 'Groß genug für 10-15 Jahre.' Test: Ein Geschäftsführer nennt den Namen "
         "im selben Satz wie SAP und Oracle, ohne dass er klein oder verspielt wirkt. Wenn der Name "
@@ -533,6 +555,19 @@ ABSTRACT_ANGLES = [
     "rundes, souveränes Zwei-Silben-Wort OHNE direkte Bedeutung — reiner Klang mit Gravitas.",
     "Minimal verfremdetes reales Wort: Nimm ein kurzes, kraftvolles echtes Wort und verändere "
     "genau einen Buchstaben, sodass es markenfähig wird und trotzdem eindeutig schreibbar bleibt.",
+]
+# Winkel für den strengen Zweisilber-Modus (Sage/Xero-Format). Bewusst ein eigener
+# Konsonant-Ende-Batch: sonst konvergiert alles auf das '-a/-o'-Schema.
+ABSTRACT_ANGLES_STRICT = [
+    "Zweisilber mit KONSONANT-ENDE (wichtigster Batch): Namen, die auf einen klaren Konsonanten "
+    "enden (n, r, s, t, m, l — wie 'Verstan', 'Sage' endet zwar auf e, aber KLINGT konsonantisch "
+    "kurz). Deutsch- oder englisch-verwurzelt, geerdet, markant. KEINE Endung auf -a oder -o in "
+    "diesem Batch.",
+    "Verdichtete Wortwurzel als Zweisilber: Wurzel (Latein/Deutsch/Englisch für Ordnung, Verstehen, "
+    "Zusammenspiel, Ganzheit) so stark geclippt, dass genau 2 Silben bleiben — Bedeutung nur noch "
+    "als Echo. Höchstens die Hälfte darf auf -a/-o enden.",
+    "Freies Zweisilber-Kunstwort: reiner Klang mit Gravitas, offene Vokale, 4-7 Buchstaben, "
+    "sofort aussprechbar (deutsch UND englisch). Mische Vokal- und Konsonant-Enden.",
 ]
 def parse_candidates(text: str) -> list[dict]:
     if not text:
@@ -654,9 +689,10 @@ def generate_names_diverse(brief: dict, n: int) -> list[dict] | None:
     """
     if brief.get("mode") != "abstract":
         return generate_names(brief, n)
-    per = max(4, round(n / len(ABSTRACT_ANGLES)))
+    angles = ABSTRACT_ANGLES_STRICT if brief.get("strict_two") else ABSTRACT_ANGLES
+    per = max(4, round(n / len(angles)))
     all_c, seen = [], set()
-    for i, angle in enumerate(ABSTRACT_ANGLES):
+    for i, angle in enumerate(angles):
         cands = generate_names(brief, per, angle=angle)
         if cands is None and i == 0:
             return None  # harter Fehler (Key/Paket) direkt beim ersten Call
@@ -827,14 +863,18 @@ with tab_find:
         "Namens-Register",
         [
             "Kurz & abstrakt – Plattform-Stil (SAP / Odoo / Xero)",
+            "Strenger Zweisilber – genau 2 Silben (Sage / Xero-Format)",
             "Bildhaft-beschreibend (Trueforge / deepMerge)",
         ],
         index=0,
         key="gen_mode",
-        help="Plattform-Stil: 1 Wort, max. 8 Buchstaben, 2 Silben, abstrakt — die Anmutung echter ERP-Flaggschiffe. "
+        help="Plattform-Stil: 1 Wort, max. 8-9 Buchstaben, 2-3 Silben, abstrakt. "
+             "Strenger Zweisilber: genau 2 Silben und max. 8 Buchstaben als HARTES K.o. — inkl. "
+             "eigenem Konsonant-Ende-Batch gegen die '-a/-o'-Konvergenz. "
              "Bildhaft: der bisherige Kompositum-Stil.",
     )
-    naming_mode = "abstract" if naming_mode_label.startswith("Kurz") else "descriptive"
+    naming_mode = "descriptive" if naming_mode_label.startswith("Bildhaft") else "abstract"
+    strict_two = naming_mode_label.startswith("Strenger")
     category = st.text_input(
         "Produkt / Kategorie",
         value="Cloudfähiges, KI-gestütztes Unternehmenssystem (ERP-Nachfolger), das das Unternehmen versteht",
@@ -899,6 +939,7 @@ with tab_find:
     if gen_btn:
         brief = {
             "mode": naming_mode,
+            "strict_two": strict_two,
             "category": category.strip() or "Software",
             "attributes": attributes + ([a.strip() for a in attr_extra.split(",") if a.strip()] if attr_extra else []),
             "seed": seed.strip(),
@@ -922,7 +963,8 @@ with tab_find:
         kept, dropped_naming = [], []
         for c in cands:
             hard, soft = naming_issues(c["name"], open_vowels=brief["open_vowels"],
-                                       no_erp=brief["no_erp"], mode=naming_mode)
+                                       no_erp=brief["no_erp"], mode=naming_mode,
+                                       strict_two=strict_two)
             c["tags"] = soft
             if hard:
                 c["naming_reasons"] = hard
@@ -994,7 +1036,7 @@ with tab_find:
           <div><span style="font-size:1.5rem;font-weight:700;color:#2B6CB0;">{len(dropped_juror)}</span><br>
                <span style="font-size:0.8rem;color:#718096;">Juror-K.o.</span></div>
           <div style="margin-left:auto;font-size:0.78rem;color:#A0AEC0;align-self:center;">
-            EUIPO · Nizza 9, 42<br>{'Plattform-Modus' if naming_mode == 'abstract' else 'Bildhafter Modus'}
+            EUIPO · Nizza 9, 42<br>{'Zweisilber-Modus' if strict_two else ('Plattform-Modus' if naming_mode == 'abstract' else 'Bildhafter Modus')}
           </div>
         </div>
         """, unsafe_allow_html=True)
